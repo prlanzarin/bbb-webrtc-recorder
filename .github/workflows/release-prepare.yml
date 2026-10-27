@@ -1,0 +1,78 @@
+name: Prepare a release
+
+# Opens the release pull request: VERSION and a CHANGELOG.md section from the
+# commits since the last tag. Merging it publishes the release
+# (release-publish.yml). See docs/releasing.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    name: Open the release pull request
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          # The last tag and every commit since it.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Write VERSION and the CHANGELOG.md section
+        id: prepare
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          go run ./cmd/release prepare -bump "$BUMP" > "$RUNNER_TEMP/section.md"
+          echo "version=$(go run ./cmd/release version)" >> "$GITHUB_OUTPUT"
+
+      - name: Open the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.prepare.outputs.version }}
+          ACTOR: ${{ github.actor }}
+          ACTOR_ID: ${{ github.actor_id }}
+        run: |
+          branch="release/v$VERSION"
+          if [ "$(gh pr list --head "$branch" --state open --json number --jq length)" != 0 ]; then
+            echo "::error::A pull request from $branch is already open. Merge it, or close it and run this again."
+            exit 1
+          fi
+
+          git config user.name "$ACTOR"
+          git config user.email "$ACTOR_ID+$ACTOR@users.noreply.github.com"
+          git switch -c "$branch"
+          git add VERSION CHANGELOG.md
+          git commit -m "build: v$VERSION"
+          # With no pull request open, a branch left by an earlier attempt is
+          # stale: replace it.
+          git push --force origin "$branch"
+
+          {
+            echo "Merging this pull request publishes v$VERSION: it tags the merge, moves \`main\` to it, builds the Docker images and creates the GitHub release from the section below."
+            echo
+            echo "Edit \`CHANGELOG.md\` on this branch to reword an entry; the release notes take the merged text."
+            echo
+            cat "$RUNNER_TEMP/section.md"
+          } > "$RUNNER_TEMP/body.md"
+          gh pr create --base develop --head "$branch" --title "build: v$VERSION" --body-file "$RUNNER_TEMP/body.md"

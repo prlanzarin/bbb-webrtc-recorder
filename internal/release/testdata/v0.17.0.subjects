@@ -1,0 +1,39 @@
+test(webm): add the WebmRecorder robustness tests
+build(livekit): build media-sdk's jitter package from a local copy
+fix(livekit): drop an expired incomplete frame at its deadline
+test(livekit): run the timed track buffer tests under synctest
+refactor(livekit): run a track's read loop from a method
+test(corpus): add a packet trace format with generators and mutations
+test(corpus): add a WebM read-back oracle
+test(livekit): replay a seed corpus through the read loop
+fix(livekit): look up the flow state under the lock on a read error
+fix(livekit): keep the flow check running while a track is read
+test(livekit): race GetStats against track registration
+fix(livekit): write one RTP dump file per track
+feat(corpus): stream traces and record reader events
+feat(livekit): capture each track's reads as a trace
+fix(livekit): clear the discont flag of a recycled jitter packet
+test(corpus): generate the seed traces from the repository
+test(e2e): add a LiveKit end-to-end harness and baseline scenario
+test(e2e): add the closed-loop loss and paced key frame scenarios
+test(e2e): add the signalling drop scenarios
+test(e2e): add the NACK/RTX loss-recovery scenario
+ci: run the LiveKit end-to-end suite nightly and on recorder PRs
+fix(livekit): do not report flowing on LiveKit's padding
+test(e2e): check that flowing follows the first media read
+fix(mediasoup): guard the keyframe request state with the adapter lock
+fix(server): do not close a session's command channel on stop
+ci: run the unit tests with the race detector
+build: pin golangci-lint and commit its configuration
+build: add a Makefile
+style: format the files the configured formatters flag
+docs: version the agent instructions as AGENTS.md
+fix(livekit): deliver flow events without holding the adapter lock
+fix(app): order the shutdown handler's reads after Run's setup
+ci: run the e2e suite with a race-enabled recorder too
+fix(webm): write the held audio frames when the recorder closes
+fix(livekit): close the recorder after the track readers end
+fix(server): take the LiveKit stats after the recorder closes
+test(e2e): cover a packet loss right before the recording stops
+docs: add a writing style section to AGENTS.md
+build: v0.17.0

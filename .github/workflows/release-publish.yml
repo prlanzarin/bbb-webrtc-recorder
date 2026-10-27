@@ -1,0 +1,122 @@
+name: Publish a release
+
+# Runs when a push to develop changes VERSION, as merging the release pull
+# request (release-prepare.yml) does. It tags the pushed commit, starts the
+# Docker image build on the tag, creates the GitHub release from the
+# version's CHANGELOG.md section, and moves main to the tagged commit. See
+# docs/releasing.md.
+
+on:
+  push:
+    branches:
+      - develop
+    paths:
+      - VERSION
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  # To start the Docker image workflow.
+  actions: write
+
+# A run waits for the one in progress. GitHub cancels a waiting run when
+# another one queues; re-run the cancelled one from its page, which keeps its
+# commit.
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish the release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # GitHub can refuse a push made with the workflow's own token when the
+      # commits change workflow files. A RELEASE_TOKEN secret, if set, makes
+      # the pushes instead.
+      USE_RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN != '' }}
+    steps:
+      - name: Check out the release
+        uses: actions/checkout@v4
+        with:
+          # Every tag, to find an existing one, and the full history, for the
+          # ancestry checks.
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Every check runs before anything changes. A rerun, or a run by hand,
+      # finishes a partial publish: an existing tag is kept, and once the
+      # GitHub release exists only main is left to move.
+      - name: Check the release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$GITHUB_REF" != refs/heads/develop ]; then
+            echo "::error::Run this on develop."
+            exit 1
+          fi
+
+          tag="v$(go run ./cmd/release version)"
+          go run ./cmd/release notes > "$RUNNER_TEMP/notes.md"
+          if sha=$(git rev-parse --quiet --verify "refs/tags/$tag^{commit}") && ! git merge-base --is-ancestor "$sha" "$GITHUB_SHA"; then
+            echo "::error::$tag tags $sha, which $GITHUB_SHA does not contain."
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "$tag is already published."
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Tag the release
+        id: tag
+        if: steps.release.outputs.published != 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if git rev-parse --quiet --verify "refs/tags/$TAG" > /dev/null; then
+            echo "$TAG already tags $(git rev-parse --short "$TAG^{commit}"); keeping it."
+          else
+            git tag "$TAG" "$GITHUB_SHA"
+            git push origin "$TAG"
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A tag pushed with the workflow's token starts no workflow, but a
+      # workflow_dispatch does, and the image tags come from the ref either
+      # way. A tag this run pushed with RELEASE_TOKEN starts the build itself.
+      - name: Build the Docker images
+        if: steps.release.outputs.published != 'true' && !(env.USE_RELEASE_TOKEN == 'true' && steps.tag.outputs.pushed == 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: gh workflow run publish-docker-image.yml --ref "$TAG"
+
+      - name: Create the GitHub release
+        if: steps.release.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: gh release create "$TAG" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag
+
+      # Last, and on every run, so that a failed move can be finished. A
+      # fast-forward only: it fails when main has commits develop lacks.
+      - name: Move main to the release
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          sha=$(git rev-parse "$TAG^{commit}")
+          git fetch --quiet origin main
+          if git merge-base --is-ancestor "$sha" origin/main; then
+            echo "main already has $TAG."
+          else
+            git push origin "$sha:refs/heads/main"
+          fi

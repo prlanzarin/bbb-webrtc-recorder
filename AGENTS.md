@@ -21,6 +21,8 @@ go build -o bbb-webrtc-recorder -gcflags=all="-N -l" ./cmd/bbb-webrtc-recorder
 ./build/bbb-webrtc-recorder [-c config.yml] --dump recorder.directory
 ```
 
+Releases go through two GitHub Actions workflows, `release-prepare.yml` and `release-publish.yml`, which run `cmd/release`: see `docs/releasing.md`. `go run ./cmd/release prepare -bump minor -dry-run` previews the next one.
+
 ## Testing
 
 ```bash

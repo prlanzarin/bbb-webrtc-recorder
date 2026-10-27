@@ -1,0 +1,9 @@
+test: replace two t.Errorf calls with testify
+fix(app): shut down gracefully on SIGTERM too
+test(e2e): cover a shutdown by SIGINT and by SIGTERM
+feat(corpus): model senders whose media clock runs slow
+fix(webm): skip an Opus frame whose timestamp goes back
+fix(livekit): keep microphone recordings on the wall clock
+feat(appstats): export the microphones' media clock
+test(e2e): cover a microphone whose media clock runs slow
+build: v0.18.0

@@ -146,6 +146,10 @@ scenarios that are hard to get right, such as a microphone whose media clock
 runs slow. For each one, it says what goes wrong, what the recorder does,
 where to look and its known limits.
 
+### Releasing
+
+GitHub Actions cut the releases: see [Releasing](docs/releasing.md).
+
 ### PubSub events/calls
 
 `startRecording` (SFU -> Recorder)
