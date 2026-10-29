@@ -133,6 +133,61 @@ func wholeKeyFrame(recs []corpus.Record) bool {
 	return true
 }
 
+// capturePlacement is what placeOnCaptureClock finds for one file.
+type capturePlacement struct {
+	Late    time.Duration // how late the first frame plays after its capture
+	Worst   time.Duration // the other frames' worst drift from Late
+	Started events.RecordingMediaStarted
+	Out     *Output
+}
+
+// placeOnCaptureClock places each frame of rec at mediaStart plus its PTS,
+// and finds its capture time through the sender reports of the browser
+// track sid. It checks that mediaStart is at most 500 ms before the first
+// written frame's read, and at most 1 ms after it.
+func placeOnCaptureClock(ctx context.Context, t *testing.T, s *Stack, name string, rec *Recording, sid string) capturePlacement {
+	t.Helper()
+
+	out := ReadOutput(t, rec, sid)
+	clock := newSenderClock(out.Trace)
+	require.NotEmpty(t, clock.reports, "%s: no sender report", name)
+
+	// The recorder sends recordingMediaStarted before recordingStopped,
+	// which has already arrived, so a short wait is enough.
+	waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
+	var started events.RecordingMediaStarted
+	_, err := s.Driver.waitDecode(waitCtx, rec.From, events.RecordingMediaStartedKey, rec.SessionID, &started)
+	waitCancel()
+	require.NoError(t, err, "%s: recordingMediaStarted", name)
+	start := time.UnixMilli(started.MediaStartUTC)
+
+	ts0, readUs := firstWrittenFrame(out.Trace)
+	require.GreaterOrEqual(t, readUs, int64(0), "%s: no frame the recorder would write", name)
+	read := time.UnixMicro(out.Trace.Header.EpochUnixUs + readUs)
+	assert.WithinRange(t, start, read.Add(-500*time.Millisecond), read.Add(time.Millisecond),
+		"%s: mediaStart against the first frame's read", name)
+
+	captured := clock.at(ts0)
+	late := start.Sub(captured)
+
+	var worst time.Duration
+	for _, pts := range out.WebM.PTS {
+		d := pts - out.WebM.PTS[0]
+		ts := ts0 + uint32(d*int64(clock.rate)/1000)
+		drift := start.Add(time.Duration(d)*time.Millisecond).Sub(clock.at(ts)) - late
+		if drift.Abs() > worst.Abs() {
+			worst = drift
+		}
+	}
+
+	flowingAt := firstFlowing(s.Driver, rec.From, rec.SessionID)
+	t.Logf("%s: %d blocks, %d sender reports; mediaStart plays the media %v after its capture, "+
+		"drifting %v at worst; a start stamped on flowing would play it %v after",
+		name, out.WebM.Blocks, len(clock.reports), late, worst, flowingAt.Sub(captured))
+
+	return capturePlacement{Late: late, Worst: worst, Started: started, Out: out}
+}
+
 // TestBrowserMediaTimestampsKeepLipSync records Chromium's camera and
 // microphone, one session each. Both tracks' sender reports map their RTP
 // timestamps to the browser's capture clock. A file's mediaStart, less the
@@ -188,43 +243,9 @@ func TestBrowserMediaTimestampsKeepLipSync(t *testing.T) {
 		rec  *Recording
 		sid  string
 	}{{"camera", recCam, cam.SID}, {"microphone", recMic, mic.SID}} {
-		out := ReadOutput(t, c.rec, c.sid)
-		clock := newSenderClock(out.Trace)
-		require.NotEmpty(t, clock.reports, "%s: no sender report", c.name)
-
-		// The recorder sends recordingMediaStarted before recordingStopped,
-		// which has already arrived, so a short wait is enough.
-		waitCtx, waitCancel := context.WithTimeout(ctx, 5*time.Second)
-		var started events.RecordingMediaStarted
-		_, err := s.Driver.waitDecode(waitCtx, c.rec.From, events.RecordingMediaStartedKey, c.rec.SessionID, &started)
-		waitCancel()
-		require.NoError(t, err, "%s: recordingMediaStarted", c.name)
-		start := time.UnixMilli(started.MediaStartUTC)
-
-		ts0, readUs := firstWrittenFrame(out.Trace)
-		require.GreaterOrEqual(t, readUs, int64(0), "%s: no frame the recorder would write", c.name)
-		read := time.UnixMicro(out.Trace.Header.EpochUnixUs + readUs)
-		assert.WithinRange(t, start, read.Add(-500*time.Millisecond), read.Add(time.Millisecond),
-			"%s: mediaStart against the first frame's read", c.name)
-
-		captured := clock.at(ts0)
-		late[c.name] = start.Sub(captured)
-
-		var worst time.Duration
-		for _, pts := range out.WebM.PTS {
-			d := pts - out.WebM.PTS[0]
-			ts := ts0 + uint32(d*int64(clock.rate)/1000)
-			drift := start.Add(time.Duration(d)*time.Millisecond).Sub(clock.at(ts)) - late[c.name]
-			if drift.Abs() > worst.Abs() {
-				worst = drift
-			}
-		}
-
-		flowingAt := firstFlowing(s.Driver, c.rec.From, c.rec.SessionID)
-		t.Logf("%s: %d blocks, %d sender reports; mediaStart plays the media %v after its capture, "+
-			"drifting %v at worst; a start stamped on flowing would play it %v after",
-			c.name, out.WebM.Blocks, len(clock.reports), late[c.name], worst, flowingAt.Sub(captured))
-		assert.LessOrEqual(t, worst.Abs(), driftBound, "%s: drift against the capture clock", c.name)
+		p := placeOnCaptureClock(ctx, t, s, c.name, c.rec, c.sid)
+		late[c.name] = p.Late
+		assert.LessOrEqual(t, p.Worst.Abs(), driftBound, "%s: drift against the capture clock", c.name)
 	}
 
 	lipSync := late["camera"] - late["microphone"]

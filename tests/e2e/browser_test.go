@@ -243,17 +243,43 @@ type BrowserPeer struct {
 	room string
 }
 
-// Join opens a page for identity and connects it to room.
+// Join opens a page for identity and connects it to room, with
+// livekit-client's default room options.
 func (b *Browser) Join(room, identity string) *BrowserPeer {
 	b.t.Helper()
 
-	b.call("join", map[string]any{"peer": identity, "url": b.lk.URL, "token": b.lk.Token(b.t, room, identity, nil)}, nil)
+	return b.join(room, identity, nil)
+}
+
+// bbbRoomOptions are the room options BBB's client connects with
+// (settings.yml, public.media.livekit.roomOptions).
+var bbbRoomOptions = map[string]any{
+	"adaptiveStream":            true,
+	"dynacast":                  true,
+	"stopLocalTrackOnUnpublish": false,
+	"singlePeerConnection":      false,
+}
+
+// JoinAsBBB is Join with the room options of BBB's client. With dynacast,
+// the page sends only the camera layers LiveKit asks for.
+func (b *Browser) JoinAsBBB(room, identity string) *BrowserPeer {
+	b.t.Helper()
+
+	return b.join(room, identity, bbbRoomOptions)
+}
+
+func (b *Browser) join(room, identity string, roomOptions map[string]any) *BrowserPeer {
+	b.t.Helper()
+
+	b.call("join", map[string]any{
+		"peer": identity, "url": b.lk.URL, "token": b.lk.Token(b.t, room, identity, nil), "roomOptions": roomOptions,
+	}, nil)
 
 	return &BrowserPeer{Identity: identity, b: b, room: room}
 }
 
 // MicOptions are a microphone's publish options. The zero value publishes as
-// BBB's client does by default: no DTX, RED on.
+// BBB's client does by default: no DTX, RED on, 48 kbps at most.
 type MicOptions struct {
 	Name       string // default "microphone"
 	DTX        bool
@@ -314,6 +340,94 @@ func (p *BrowserPeer) PublishCamera(o CameraOptions) *BrowserTrack {
 	require.NoError(p.b.t, waitTracksListed(ctx, p.b.lk, p.room, p.Identity, published.TrackSid))
 
 	return &BrowserTrack{SID: published.TrackSid}
+}
+
+// CameraProfile is one of BBB's camera profiles (settings.yml,
+// public.kurento.cameraProfiles).
+type CameraProfile struct {
+	ID          string         `json:"id"`
+	Bitrate     int            `json:"bitrate"` // kbps
+	Hidden      bool           `json:"hidden,omitempty"`
+	Constraints map[string]any `json:"constraints,omitempty"`
+}
+
+// bbbCameraProfiles are the profiles of settings.yml that can become
+// simulcast layers: the hidden ones never do.
+var bbbCameraProfiles = []CameraProfile{
+	{ID: "low", Bitrate: 100},
+	{ID: "medium", Bitrate: 200},
+	{ID: "high", Bitrate: 500, Constraints: map[string]any{"width": 1280, "height": 720, "frameRate": 15}},
+	{ID: "hd", Bitrate: 800, Constraints: map[string]any{"width": 1280, "height": 720, "frameRate": 30}},
+}
+
+// bbbDefaultCameraProfile is the profile settings.yml marks as the default.
+const bbbDefaultCameraProfile = "medium"
+
+// BBBCamera is a camera published as BBB's client publishes it.
+type BBBCamera struct {
+	BrowserTrack
+	// Capture is the size and frame rate Chromium captures at.
+	Capture struct {
+		Width, Height int
+		FrameRate     float64
+	}
+}
+
+// PublishBBBCamera publishes the browser's fake camera as BBB's client does
+// with profile, one of bbbCameraProfiles. It captures with the profile's
+// constraints and sends VP8, a simulcast layer per visible profile up to
+// profile. It waits until LiveKit lists the track.
+func (p *BrowserPeer) PublishBBBCamera(name, profile string) *BBBCamera {
+	p.b.t.Helper()
+
+	var cam struct {
+		TrackSid string
+		Capture  struct {
+			Width, Height int
+			FrameRate     float64
+		}
+	}
+	p.b.call("publishBBBCamera", map[string]any{
+		"peer": p.Identity, "name": name, "profiles": bbbCameraProfiles, "profileId": profile,
+	}, &cam)
+
+	ctx, cancel := context.WithTimeout(p.b.t.Context(), browserCallTimeout)
+	defer cancel()
+
+	require.NoError(p.b.t, waitTracksListed(ctx, p.b.lk, p.room, p.Identity, cam.TrackSid))
+
+	return &BBBCamera{BrowserTrack: BrowserTrack{SID: cam.TrackSid}, Capture: cam.Capture}
+}
+
+// SetCameraLayer starts or stops sending the simulcast layer rid of the
+// camera sid, through its active flag. To LiveKit, a stopped layer looks
+// the same as one Chromium drops on a low bandwidth estimate.
+func (p *BrowserPeer) SetCameraLayer(sid, rid string, active bool) {
+	p.b.t.Helper()
+
+	p.b.call("setCameraLayer", map[string]any{"peer": p.Identity, "trackSid": sid, "rid": rid, "active": active}, nil)
+}
+
+// CameraLayers returns the active flag of each simulcast layer of the
+// camera sid, by rid.
+func (p *BrowserPeer) CameraLayers(sid string) map[string]bool {
+	p.b.t.Helper()
+
+	var layers map[string]bool
+	p.b.call("cameraLayers", map[string]any{"peer": p.Identity, "trackSid": sid}, &layers)
+
+	return layers
+}
+
+// CameraPLIs returns how many PLIs each simulcast layer of the camera sid
+// has received, by rid, from Chromium's outbound-rtp stats.
+func (p *BrowserPeer) CameraPLIs(sid string) map[string]int {
+	p.b.t.Helper()
+
+	var plis map[string]int
+	p.b.call("cameraPLIs", map[string]any{"peer": p.Identity, "trackSid": sid}, &plis)
+
+	return plis
 }
 
 // CaptureFreeze stops the browser's audio service process for Burst, once

@@ -45,7 +45,9 @@ const methods = {
     return { version: browser.version() };
   },
 
-  async join({ peer, url, token }) {
+  // roomOptions, when set, are the Room's options; else livekit-client's
+  // defaults apply.
+  async join({ peer, url, token, roomOptions }) {
     // The routed page has no address of its own. Chromium's Local Network
     // Access treats it as outside the loopback address space, so it refuses
     // the page's connections to LiveKit on 127.0.0.1 unless this is granted.
@@ -58,22 +60,25 @@ const methods = {
     await p.route('http://localhost/', (r) => r.fulfill({ contentType: 'text/html', body: '<!doctype html><title>e2e</title>' }));
     await p.goto('http://localhost/');
     await p.addScriptTag({ path: livekitClient });
-    await p.evaluate(async ({ url, token }) => {
-      const room = new window.LivekitClient.Room();
+    await p.evaluate(async ({ url, token, roomOptions }) => {
+      const room = new window.LivekitClient.Room(roomOptions);
       await room.connect(url, token);
       window.e2eRoom = room;
-    }, { url, token });
+    }, { url, token, roomOptions });
     peers.set(peer, { context, page: p });
 
     return {};
   },
 
+  // BBB's settings.yml sets this preset
+  // (public.media.livekit.audio.publishOptions.audioPreset).
   async publishMic({ peer, name, dtx, red }) {
     const trackSid = await page(peer).evaluate(async ({ name, dtx, red }) => {
       const { Track, createLocalAudioTrack } = window.LivekitClient;
       const track = await createLocalAudioTrack();
       const pub = await window.e2eRoom.localParticipant.publishTrack(track, {
         source: Track.Source.Microphone, name, dtx, red,
+        audioPreset: { maxBitrate: 48000, networkPriority: 'high', priority: 'high' },
       });
 
       return pub.trackSid;
@@ -95,6 +100,108 @@ const methods = {
     }, { name, width, height, fps });
 
     return { trackSid };
+  },
+
+  // Publishes the fake camera as BBB's client does with the camera profile
+  // profileId, one of profiles. The capture and the publish options follow
+  // bigbluebutton-html5's livekit-camera-bridge (service.ts, component.tsx)
+  // and services/livekit/presets.ts. The visible profiles up to the selected
+  // one, three at most, become simulcast layers. A profile without a width
+  // and height gets the capture's size, scaled by the square root of its
+  // bitrate's ratio to the selected profile's.
+  async publishBBBCamera({ peer, name, profiles, profileId }) {
+    return page(peer).evaluate(async ({ name, profiles, profileId }) => {
+      const { Track, VideoPreset } = window.LivekitClient;
+      const profile = profiles.find((p) => p.id === profileId);
+      if (!profile) throw new Error(`no camera profile ${profileId}`);
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { ...profile.constraints } });
+      const [track] = stream.getVideoTracks();
+      const capture = track.getSettings();
+
+      const value = (c) => (typeof c === 'number' ? c : c?.exact ?? c?.ideal ?? c?.max);
+      const toPreset = (p) => {
+        const width = value(p.constraints?.width);
+        const height = value(p.constraints?.height);
+        const fps = value(p.constraints?.frameRate);
+        if (width && height) return new VideoPreset(width, height, p.bitrate * 1000, fps, 'medium');
+
+        const scale = Math.sqrt(p.bitrate / profile.bitrate);
+        const w = Math.max(2, Math.round(capture.width * scale));
+        const h = Math.max(2, Math.round(capture.height * scale));
+
+        return new VideoPreset(w - (w % 2), h - (h % 2), p.bitrate * 1000, fps, 'medium');
+      };
+
+      const visible = profiles.filter((p) => !p.hidden);
+      const selected = visible.findIndex((p) => p.id === profileId);
+      // html5 publishes a hidden profile as one layer; no scenario selects one.
+      if (selected < 0) throw new Error(`camera profile ${profileId} is hidden`);
+      const effectiveFps = (p) => Math.min(p.encoding.maxFramerate ?? capture.frameRate, capture.frameRate);
+      const presets = [];
+      for (const preset of visible.slice(Math.max(0, selected - 2), selected + 1).map(toPreset)) {
+        if (!presets.some((p) => p.width === preset.width && p.height === preset.height
+          && p.encoding.maxBitrate === preset.encoding.maxBitrate && effectiveFps(p) === effectiveFps(preset))) {
+          presets.push(preset);
+        }
+      }
+
+      const { maxFramerate, ...videoEncoding } = presets[presets.length - 1].encoding;
+      if (maxFramerate != null) videoEncoding.maxFramerate = maxFramerate;
+      const layers = presets.slice(0, -1);
+
+      const pub = await window.e2eRoom.localParticipant.publishTrack(track, {
+        dtx: true,
+        videoCodec: 'vp8',
+        degradationPreference: 'balanced',
+        simulcast: presets.length > 1,
+        videoEncoding,
+        videoSimulcastLayers: layers.length > 0 ? layers : undefined,
+        source: Track.Source.Camera,
+        name,
+      });
+
+      return { trackSid: pub.trackSid, capture: { width: capture.width, height: capture.height, frameRate: capture.frameRate } };
+    }, { name, profiles, profileId });
+  },
+
+  // See SetCameraLayer in browser_test.go.
+  async setCameraLayer({ peer, trackSid, rid, active }) {
+    await page(peer).evaluate(async ({ trackSid, rid, active }) => {
+      const pub = window.e2eRoom.localParticipant.trackPublications.get(trackSid);
+      if (!pub?.track?.sender) throw new Error(`no sender for ${trackSid}`);
+      const { sender } = pub.track;
+      const params = sender.getParameters();
+      const encoding = params.encodings.find((e) => e.rid === rid);
+      if (!encoding) throw new Error(`${trackSid} has no layer ${rid}`);
+      encoding.active = active;
+      await sender.setParameters(params);
+    }, { trackSid, rid, active });
+
+    return {};
+  },
+
+  // See CameraLayers in browser_test.go.
+  async cameraLayers({ peer, trackSid }) {
+    return page(peer).evaluate(({ trackSid }) => {
+      const pub = window.e2eRoom.localParticipant.trackPublications.get(trackSid);
+      if (!pub?.track?.sender) throw new Error(`no sender for ${trackSid}`);
+
+      return Object.fromEntries(pub.track.sender.getParameters().encodings.map((e) => [e.rid, e.active]));
+    }, { trackSid });
+  },
+
+  // See CameraPLIs in browser_test.go.
+  async cameraPLIs({ peer, trackSid }) {
+    return page(peer).evaluate(async ({ trackSid }) => {
+      const pub = window.e2eRoom.localParticipant.trackPublications.get(trackSid);
+      if (!pub?.track?.sender) throw new Error(`no sender for ${trackSid}`);
+      const plis = {};
+      (await pub.track.sender.getStats()).forEach((s) => {
+        if (s.type === 'outbound-rtp' && s.rid) plis[s.rid] = s.pliCount ?? 0;
+      });
+
+      return plis;
+    }, { trackSid });
   },
 
   // See CaptureFreeze in browser_test.go. A signal that fails, as when the
