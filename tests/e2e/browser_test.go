@@ -285,6 +285,37 @@ func (p *BrowserPeer) PublishMic(o MicOptions) *BrowserTrack {
 	return &BrowserTrack{SID: published.TrackSid}
 }
 
+// CameraOptions are a camera's publish options; zero values take the
+// defaults noted.
+type CameraOptions struct {
+	Name          string // default "camera"
+	Width, Height int    // default 640x480
+	FPS           int    // default 15
+}
+
+// PublishCamera publishes the browser's fake camera as VP8, and waits until
+// LiveKit lists the track.
+func (p *BrowserPeer) PublishCamera(o CameraOptions) *BrowserTrack {
+	p.b.t.Helper()
+
+	if o.Name == "" {
+		o.Name = "camera"
+	}
+
+	var published struct{ TrackSid string }
+	p.b.call("publishCamera", map[string]any{
+		"peer": p.Identity, "name": o.Name,
+		"width": withDefault(o.Width, 640), "height": withDefault(o.Height, 480), "fps": withDefault(o.FPS, 15),
+	}, &published)
+
+	ctx, cancel := context.WithTimeout(p.b.t.Context(), browserCallTimeout)
+	defer cancel()
+
+	require.NoError(p.b.t, waitTracksListed(ctx, p.b.lk, p.room, p.Identity, published.TrackSid))
+
+	return &BrowserTrack{SID: published.TrackSid}
+}
+
 // CaptureFreeze stops the browser's audio service process for Burst, once
 // every Every. Chromium captures audio in that process, so the audio of
 // each burst is lost. The encoder's timestamps stay contiguous, so the

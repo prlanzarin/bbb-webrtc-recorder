@@ -82,6 +82,21 @@ const methods = {
     return { trackSid };
   },
 
+  // VP8 without simulcast, so the recorder gets the one stream sent.
+  async publishCamera({ peer, name, width, height, fps }) {
+    const trackSid = await page(peer).evaluate(async ({ name, width, height, fps }) => {
+      const { Track, createLocalVideoTrack } = window.LivekitClient;
+      const track = await createLocalVideoTrack({ resolution: { width, height, frameRate: fps } });
+      const pub = await window.e2eRoom.localParticipant.publishTrack(track, {
+        source: Track.Source.Camera, name, videoCodec: 'vp8', simulcast: false,
+      });
+
+      return pub.trackSid;
+    }, { name, width, height, fps });
+
+    return { trackSid };
+  },
+
   // See CaptureFreeze in browser_test.go. A signal that fails, as when the
   // process is gone, ends the freeze, and thawCapture reports it.
   async freezeCapture({ burstMs, everyMs }) {
